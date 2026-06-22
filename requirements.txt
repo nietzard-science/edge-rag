@@ -1,0 +1,168 @@
+# =============================================================================
+# EDGE-RAG REQUIREMENTS (range-constrained; for the pinned reproducibility
+# set used to produce the paper numbers, see requirements_frozen.txt)
+# =============================================================================
+#
+# Version: 5.5
+# Author:  Jan Nietzard
+# Last reviewed: 2026-06-01
+#
+# Every entry below is annotated with the concrete call site that imports it.
+# Anything without a call site has been moved to the "Removed in 5.5" block at
+# the bottom of this file with a justification, so a stale install can be
+# diff'd against the current state.
+#
+# Install:
+#   pip install -r requirements.txt
+#   python -m spacy download en_core_web_sm
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CORE — direct imports in src/ or test_system/. Removing any of these breaks
+# a documented code path.
+# -----------------------------------------------------------------------------
+
+# Document / Embeddings interfaces (langchain.schema.Document and
+# langchain_core.embeddings.Embeddings) used in src/data_layer/chunking.py,
+# src/pipeline/ingestion_pipeline.py, src/data_layer/embeddings.py.
+langchain>=0.3.0,<0.4.0
+langchain-core>=0.3.0,<0.4.0
+# RecursiveCharacterTextSplitter in src/data_layer/chunking.py.
+langchain-text-splitters>=0.3.0,<0.4.0
+
+# YAML loader for config/settings.yaml (src/logic_layer/_settings_loader.py).
+pyyaml>=6.0.1
+
+# Dense linear algebra for the 768-dim embedding vectors throughout
+# src/data_layer/ and src/logic_layer/.
+numpy>=1.24.0,<2.0.0
+
+# BM25 sparse retrieval lane, the third RRF source in
+# src/data_layer/hybrid_retriever.py (§11.x).
+rank_bm25>=0.2.2
+
+# Ollama HTTP client used by src/data_layer/embeddings.py (per-batch embed
+# requests) and src/logic_layer/verifier.py (LLM generation).
+requests>=2.31.0
+
+# Progress bars across the tier-1 evaluation CLIs (benchmark_datasets.py,
+# agentic_ablation.py, chunking_ablation.py, latency_memory_profile.py,
+# quantization_sweep.py).
+tqdm>=4.65.0
+
+# -----------------------------------------------------------------------------
+# STORAGE — embedded databases (no server process required at runtime)
+# -----------------------------------------------------------------------------
+
+# LanceDB vector store with Apache Arrow columnar files
+# (src/data_layer/storage.py).
+lancedb>=0.6.0,<0.8.0
+# Arrow IPC format; LanceDB depends on it but it is also referenced
+# explicitly by storage code paths.
+pyarrow>=12.0.0
+
+# KuzuDB embedded property graph with native Cypher
+# (src/data_layer/storage.py, src/data_layer/graph_quality.py).
+kuzu>=0.3.0
+
+# -----------------------------------------------------------------------------
+# ENTITY EXTRACTION
+# -----------------------------------------------------------------------------
+
+# spaCy — tokeniser / sentence splitter / NER / dependency parser used in
+# src/logic_layer/planner.py, src/data_layer/chunking.py,
+# src/data_layer/hybrid_retriever.py, src/logic_layer/controller.py.
+# Requires the small English model: `python -m spacy download en_core_web_sm`.
+spacy>=3.5.0
+
+# GLiNER — zero-shot span-based NER consumed at ingestion AND query time
+# (src/data_layer/entity_extraction.py, src/data_layer/hybrid_retriever.py).
+# Reference: Zaratiana et al. (2023), arXiv:2311.08526.
+gliner>=0.2.0
+
+# REBEL relation extraction. Lazy-loaded in colab_extraction.py (Phase 2,
+# GPU). torch is REBEL's backend; gliner also pulls them as a transitive
+# dependency, so they are listed explicitly for clarity.
+# Reference: Cabot & Navigli (2021), EMNLP Findings.
+transformers>=4.40.0
+torch>=2.0.0
+
+# -----------------------------------------------------------------------------
+# BENCHMARK DATASETS
+# -----------------------------------------------------------------------------
+
+# HotpotQA / 2WikiMultiHopQA / StrategyQA loaders
+# (src/thesis_evaluations/benchmark_datasets.py).
+datasets>=2.14.0
+
+# -----------------------------------------------------------------------------
+# EVALUATION — produces the paper tables and figures
+# -----------------------------------------------------------------------------
+
+# Per-query and per-stage RSS profiling
+# (src/thesis_evaluations/latency_memory_profile.py,
+#  src/thesis_evaluations/quantization_sweep.py). Optional at runtime
+# (helpers degrade to None when missing) but REQUIRED to populate the §11
+# edge-feasibility memory columns.
+psutil>=5.9.0
+
+# Chapter-4 figures: Pareto front, ablation waterfall, per-stage breakdown
+# (src/thesis_evaluations/thesis_results_aggregator.py).
+matplotlib>=3.7.0
+
+# Chapter-4 knowledge-graph visualisation (test_system/graph_3d.py).
+networkx>=3.0
+
+# -----------------------------------------------------------------------------
+# TEST RUNNER
+# -----------------------------------------------------------------------------
+
+# pytest test framework + marker registry in pytest.ini
+# (test_system/test_*.py).
+pytest>=7.4.0
+
+# -----------------------------------------------------------------------------
+# OPTIONAL
+# -----------------------------------------------------------------------------
+
+# Coreference resolution at chunking time (Phase 1). Falls back to a no-op
+# when not installed; src/data_layer/coreference.py is the integration
+# point and the magnitude of the effect on graph density is explicitly
+# out of scope for the paper's quantitative evaluation (§12.2 limitation 5).
+# Install:
+#   pip install coreferee
+#   python -m coreferee install en
+#   python -m spacy download en_core_web_md
+# coreferee>=1.4.0
+
+# =============================================================================
+# REMOVED IN 5.5 — listed here so a stale install file can be diff'd.
+# =============================================================================
+# langgraph, langgraph-checkpoint  — LangGraph orchestrator was removed in
+#                                    the 2026-05 audit (§11.10). 0 imports.
+# langchain-community              — no direct imports anywhere in src/.
+# langsmith, httpx                 — transitive deps of langchain; the explicit
+#                                    pins added no value.
+# pydantic, typing-extensions      — transitive deps of langchain; not directly
+#                                    imported by project code.
+# python-dotenv                    — no `from dotenv import load_dotenv` call
+#                                    site; environment is read directly from
+#                                    config/settings.yaml.
+# scipy, scikit-learn              — no direct imports.
+# pypdf, pdf2image, python-docx    — DocumentLoader only supports JSON/JSONL;
+#                                    its docstring explicitly says "PDF support
+#                                    is NOT implemented" (see
+#                                    src/pipeline/ingestion_pipeline.py:336).
+# networkx (was: 4.0.0 "removed")  — RE-LISTED above: test_system/graph_3d.py
+#                                    needs it for the chapter-4 figure. The old
+#                                    runtime dependency in src/data_layer/
+#                                    storage.py was indeed removed; the test-
+#                                    side use is still live.
+#
+# =============================================================================
+# VERSION COMPATIBILITY NOTES
+# =============================================================================
+# langchain 0.3.x requires langchain-core 0.3.x (not 1.x).
+# numpy is pinned <2.0 because lancedb 0.6/0.7 does not support NumPy 2.x.
+# =============================================================================

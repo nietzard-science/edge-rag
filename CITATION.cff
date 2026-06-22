@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the software and the paper below."
+title: "Edge-RAG: CPU-only hybrid retrieval-augmented generation for edge devices"
+authors:
+  - family-names: "Nietzard"
+    given-names: "Jan"
+repository-code: "https://github.com/nietzard-science/edge-rag"
+license: MIT
+version: "1.0"
+date-released: "2026-06-22"
+keywords:
+  - retrieval-augmented-generation
+  - knowledge-graph
+  - edge-computing
+  - hybrid-retrieval
+  - small-language-models
+preferred-citation:
+  type: conference-paper
+  title: "Edge-RAG: Empirical Characterization of When Knowledge-Graph Lanes Add Value in CPU-Only Hybrid Retrieval"
+  authors:
+    - family-names: "Nietzard"
+      given-names: "Jan"
+  year: 2026
+  # collection-title: "Proceedings of EMNLP 2026 (System Demonstrations)"  # uncomment once accepted

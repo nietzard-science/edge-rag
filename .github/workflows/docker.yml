@@ -1,0 +1,26 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app image
+        run: docker build -t edge-rag:ci .
+
+      - name: CLI smoke (no model pull, no Ollama)
+        # --help loads the full module graph (argparse + all the src imports) and
+        # exits 0 without touching Ollama or the stores. This catches dependency
+        # / packaging breakage — the thing a build is most likely to regress.
+        run: docker run --rm edge-rag:ci --help
+
+      - name: Demo subcommand is wired (arg-parse smoke)
+        # `demo --help` proves the one-command demo entrypoint parses; a full run
+        # needs Ollama + the mounted stores and is intentionally NOT done in CI.
+        run: docker run --rm edge-rag:ci demo --help

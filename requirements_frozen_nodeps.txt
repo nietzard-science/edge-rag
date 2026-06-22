@@ -1,0 +1,10 @@
+# Installed with --no-deps after requirements_frozen.txt (see Dockerfile / tests.yml).
+# lancedb 0.6.13 pulls pylance 0.10.12, which over-pins pyarrow<15.0.1 in its
+# metadata. That pin is stale: lancedb 0.6.13 runs correctly with the pyarrow
+# 23.x that datasets 4.5.0 requires (verified locally: LanceDB reads the 9412-row
+# HotpotQA store fine). pip refuses the *combination* at install time, so these
+# two are installed --no-deps to honour the working, reproduced configuration
+# without their obsolete transitive pyarrow ceiling. Their only non-test runtime
+# deps (pyarrow, numpy) are already pinned in requirements_frozen.txt.
+lancedb==0.6.13
+pylance==0.10.12

@@ -1,0 +1,17 @@
+{
+  "_comment": "Regex patterns that must NOT appear in the planner source body. Evaluation-set surface forms and change-log markers are stored here, out of the test source, so the test file itself carries no dev-set strings while the source-hygiene guard keeps working. See test_planner_semantic.py::TestOptionAGeneralisability.test_no_dataset_revealing_comments_in_source.",
+  "patterns": [
+    "FIX P-",
+    "idx-\\d+\\b",
+    "idx=\\d+",
+    "Kasper Schmeichel|Schmeichel",
+    "GNR\\b",
+    "Schwarzenegger",
+    "Henry Roth",
+    "Letters to Cleo",
+    "Screaming Trees",
+    "Bobbi Bacha",
+    "Sela Ward",
+    "Robert Durst"
+  ]
+}
