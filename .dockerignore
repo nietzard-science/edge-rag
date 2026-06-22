@@ -1,0 +1,46 @@
+# Keep the build context small + the image free of host artefacts.
+# The pre-built stores and datasets are MOUNTED at runtime, never copied in.
+
+# Virtualenvs / Python caches
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Large runtime data — shipped as a mounted volume / Zenodo artifact, not baked
+data/
+cache/
+evaluation_results/
+Thesis_final_analysis/
+*.lance/
+*_KuzuDB/
+*.db
+
+# Datasets / model weights
+*.safetensors
+*.gguf
+
+# VCS / IDE / OS
+.git/
+.github/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docs & dev scaffolding not needed at runtime
+*.md
+!config/**/*.md
+diagnose_*.py
+test_system/
+
+# Docker artefacts themselves
+Dockerfile
+docker-compose.yml
+.dockerignore

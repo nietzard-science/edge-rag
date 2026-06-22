@@ -1,0 +1,78 @@
+# =============================================================================
+# EDGE-RAG — one-command reproducible stack (CPU only)
+# =============================================================================
+#   docker compose up                      # bring up Ollama, pull models, idle app
+#   docker compose run --rm app demo --question "..."
+#   docker compose run --rm app evaluate --dataset hotpotqa --range 0-5
+#
+# Topology:
+#   ollama      — the LLM + embedding server (sidecar; holds the model weights)
+#   model-init  — one-shot: pulls qwen2:1.5b (generation) + nomic-embed-text
+#                 (embeddings), then exits
+#   app         — the CPU inference/retrieval/eval image (this repo)
+#
+# The app is constrained to the edge envelope (2 GB RAM / 4 cores). If a run
+# ever exceeds 2 GB the container is OOM-killed by the runtime — that failure IS
+# the evidence the system fits the claimed envelope.
+# =============================================================================
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    # Persist pulled weights so `up` is fast after the first run.
+    volumes:
+      - ollama_models:/root/.ollama
+    # Expose to the host too, so you can `ollama list` / curl it for debugging.
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Pulls BOTH models the pipeline needs (LLM + embeddings), once, then exits.
+  # nomic-embed-text is required by the retrieval path; qwen2:1.5b is the frozen
+  # paper-baseline generator. Add gemma2:2b / llama3.2:3b / phi3 here to enable
+  # the model-comparison ablation rows.
+  model-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["sh", "-c", "ollama pull qwen2:1.5b && ollama pull nomic-embed-text"]
+    restart: "no"
+
+  app:
+    build: .
+    image: edge-rag:local
+    depends_on:
+      ollama:
+        condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - CONFIG_PATH=/app/config/frozen_paper.yaml
+      - INDEX_DIR=/app/data/indices
+      - DATASET_DIR=/app/data/datasets
+    volumes:
+      # Pre-built LanceDB / KuzuDB / BM25 stores AND the per-dataset
+      # questions.json. Fetch them first: ./scripts/fetch_data.sh (Zenodo
+      # artifact) — see README "Reproduce with Docker". Read-only: the app never
+      # writes the stores.
+      - ./data/indices:/app/data/indices:ro
+      - ./data/datasets:/app/data/datasets:ro
+      # Writable cache so the cross-encoder reranker download + embedding SQLite
+      # cache persist across `run` invocations.
+      - ./cache:/app/cache
+    # ---- Edge envelope enforcement (honored by `docker compose up/run`) -------
+    # mem_limit / cpus are the keys Compose reliably applies outside swarm.
+    # Set cpus to your reference machine's core count.
+    mem_limit: 2g
+    cpus: "4"
+
+volumes:
+  ollama_models:
