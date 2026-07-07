@@ -1,0 +1,137 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE / tooling
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
+test_*.db
+
+# Model Artifacts
+models/
+checkpoints/
+*.bin
+*.safetensors
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Data & Logs
+# Ignore the whole data/ tree EXCEPT the 4 KB integrity manifest, which is the
+# reproducibility contract and must be committed (REPRODUCE.md Step 3 verifies
+# against it). Large input artifacts stay ignored and are distributed separately.
+data/*
+!data/SHA256.txt
+data_old/
+logs/
+logs/*.log
+*.log
+cache/
+
+# Databases
+*.db
+*.sqlite
+*.lancedb
+
+# Embedding Cache
+cache/embeddings.db
+cache/embeddings.db-shm
+cache/embeddings.db-wal
+
+# LanceDB Vector Store
+data/vector_db/
+*.lance
+
+# KuzuDB Graph Database
+data/knowledge_graph_kuzu/
+
+# Evaluation Results
+evaluation_results/
+ablation_results.json
+
+# HotpotQA Dataset Files
+data/hotpotqa_*.json
+
+# Benchmark Datasets
+Benchmark_datasets/
+
+# Jupyter Notebooks Checkpoints
+.ipynb_checkpoints/
+
+# Miscellaneous
+Zusatz/
+examples/output/
+nul
+graph_preview.html
+
+# Diagnostic + ablation scratch (root-only) — regenerable artifacts;
+# do not commit. See diagnose_verbose.py / ab_*.py / ablation runs.
+/trace_idx*.txt
+/ab_*.py
+/ab_*.log
+/change1_*.log
+/ablation_n*.log
+/evaluate_delivery_*.log
+/*_validation_n*.log
+
+# Per-question evaluation output (one JSONL per benchmark run).
+# Redundant with the `evaluation_results/` directory rule above, kept
+# explicit so the intent is visible to readers.
+evaluation_results/*.jsonl
+
+# Editor backup files.
+*.bak
+
+# Working scaffolding — review-prompt templates and per-layer conclusion notes.
+# Kept locally for the development workflow; not part of the published system.
+# Leading slash = top-level only, so it does NOT match docs/prompts/ (which
+# holds the published PROMPTS.md reproducibility artifact that CI checks).
+/prompts/
+
+# Personal working notes / runbooks — not part of the published artifact.
+docs/notes/
+
+# Manuscript drafts (LaTeX) — the paper lives in a separate location; this
+# in-repo copy is a working draft and its build artifacts / vendored ACL
+# style files (acl.sty, acl_natbib.bst) must not be tracked here.
+paper/
+edge-rag-stores.zip
+*.zip

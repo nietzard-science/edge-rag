@@ -1,0 +1,83 @@
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    env:
+      # The eval/diagnostic code paths assume UTF-8 I/O (the Windows host uses
+      # `python -X utf8`); set it here so CI matches.
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the frozen reproducibility interpreter (3.12.3).
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt
+          # The range-constrained requirements.txt expects the spaCy English
+          # model to be fetched separately (planner.py / chunking.py import it
+          # at module load, so the fast subset needs it present).
+          python -m spacy download en_core_web_sm
+
+      - name: Fast deterministic tests (no Ollama, no GPU, no model weights)
+        # `not slow`     — long-running unit tests
+        # `not llm`      — anything hitting a live Ollama daemon
+        # `not nightly`  — loads GLiNER/REBEL weights or a populated KuzuDB
+        # `not integration` — multi-component tests beyond unit scope
+        run: pytest test_system/ -m "not slow and not llm and not nightly and not integration" -q
+
+  repro-guard:
+    # Reproducibility contract: fails the push if (a) the frozen pin set no
+    # longer resolves, (b) frozen_paper.yaml has drifted from settings.yaml's
+    # key schema (the silent-default bug class _settings_loader guards at
+    # runtime, here enforced at push time), or (c) the published prompt export
+    # is stale vs. the source prompts. Runs in parallel with `unit`; it does
+    # NOT run the test suite.
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Frozen requirements resolve (pinned reproduction set)
+        # Install the exact `==`-pinned set used for the paper numbers. A pin
+        # that no longer resolves (yanked release, incompatible transitive
+        # constraint) breaks reproduction and must fail loudly.
+        # Two-step: lancedb/pylance go in via --no-deps (their stale pyarrow<15
+        # metadata pin conflicts with datasets' pyarrow>=21, but lancedb 0.6.13
+        # runs correctly on pyarrow 23 — see requirements_frozen_nodeps.txt).
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements_frozen.txt
+          pip install --no-cache-dir --no-deps -r requirements_frozen_nodeps.txt
+
+      - name: Frozen config schema parity (frozen_paper.yaml ↔ settings.yaml)
+        # PyYAML is already pulled in by requirements_frozen.txt.
+        run: python -X utf8 scripts/check_frozen_config.py
+
+      - name: Required-settings keys present in settings.yaml
+        # Promotes the runtime _validate_settings WARNING to a hard CI error so
+        # a missing reproducibility-critical key cannot ship silently.
+        run: |
+          python -X utf8 -W error::UserWarning -c "from src.logic_layer._settings_loader import _load_settings; _load_settings()"
+
+      - name: Prompt export is in sync with source (export_prompts --check)
+        # The B-2 reproducibility artifact: every prompt the model receives must
+        # be captured in docs/prompts/PROMPTS.md. A prompt edited without
+        # re-exporting fails here.
+        run: |
+          python -m spacy download en_core_web_sm
+          python -X utf8 scripts/export_prompts.py --check

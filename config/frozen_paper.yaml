@@ -1,0 +1,858 @@
+# ============================================================================
+# EDGE-RAG UNIFIED CONFIGURATION
+# ============================================================================
+#
+# Single source of truth for every runtime hyperparameter. All modules read
+# this file via src/logic_layer/_settings_loader.py (_load_settings); no values
+# are hardcoded in production code. Dataclass defaults are emergency fallbacks
+# only and are NOT guaranteed equal to the values here (e.g.
+# agent.max_verification_iterations is 1 here but defaults to 2 in code).
+#
+# Reproducibility: for paper evaluation, use requirements_frozen.txt together
+# with this file unchanged. Decoding is deterministic (llm.temperature: 0.0).
+#
+# Ablation: every original contribution is gated by an enable_* toggle or a
+# numeric weight in its block, so each ablation row is reproducible by editing
+# this file alone (no code changes).
+# ============================================================================
+
+# ============================================================================
+# EMBEDDING MODEL
+# ============================================================================
+embeddings:
+  # Model name (must match an Ollama installed model)
+  # Alternative (better score distribution, requires re-ingestion):
+  #   model_name: "BAAI/bge-small-en-v1.5"   # via sentence-transformers
+  # Changing this requires re-running ingestion (stored vectors become stale).
+  model_name: "nomic-embed-text"
+
+  # Ollama API endpoint
+  base_url: "http://localhost:11434"
+
+  # Embedding dimensionality
+  # nomic-embed-text: 768
+  # all-MiniLM-L6-v2: 384
+  # bge-base-en: 768
+  embedding_dim: 768
+
+  # SQLite cache for embedding results (persists across runs)
+  cache_path: "./cache/embeddings.db"
+
+# ============================================================================
+# VECTOR STORE (LanceDB)
+# ============================================================================
+vector_store:
+  db_path: "./data/vector"
+
+  # =========================================================================
+  # DISTANCE METRIC — CRITICAL SETTING
+  # =========================================================================
+  # Must be "cosine" for text embeddings.
+  # LanceDB defaults to L2 which produces incorrect similarity scores.
+  distance_metric: "cosine"
+
+  # L2 normalisation for numerical stability
+  normalize_embeddings: true
+
+  # Retrieval parameters
+  # top_k_vectors = 20: under nomic-embed-text score compression, bridge-answer
+  # chunks routinely rank 11-15. BM25 + the cross-encoder reranker downstream
+  # make the wider funnel cheap. similarity_threshold stays at 0.3 because
+  # raising it filters nothing under compressed scores (all > 0.7) and lowering
+  # it hurts no one.
+  top_k_vectors: 20
+  similarity_threshold: 0.3    # Minimum similarity [0.0, 1.0]
+  overfetch_factor: 3          # ANN candidates = top_k * overfetch_factor
+  graph_text_max_chars: 500    # Max characters stored in graph node
+
+# ============================================================================
+# KNOWLEDGE GRAPH
+# ============================================================================
+graph:
+  enabled: true
+
+  # =========================================================================
+  # BACKEND SELECTION
+  # =========================================================================
+  # Only "kuzu" is supported in v4.0.0.
+  # NetworkX fallback was removed — KuzuDB is required.
+  # Install: pip install kuzu
+  # =========================================================================
+  backend: "kuzu"
+
+  # NOTE: the KuzuDB location is NOT configured here. It is dataset-scoped and
+  # derived at runtime as ./data/<dataset>/graph/graph_KuzuDB (written by
+  # local_importingestion.py; resolved for queries by
+  # DatasetStoreManager.get_paths() in benchmark_datasets.py).
+
+  # Graph traversal settings
+  # top_k_entities = 10 mirrors the widened vector top-k. KuzuDB queries are
+  # <30 ms, so a wider funnel is essentially free and improves bridge-entity
+  # recall.
+  max_hops: 2                    # Maximum path length for traversal
+  top_k_entities: 10             # Number of graph results
+
+  # Enable the 2-bridge Hop-3 traversal. Off by default — adds 200-1000 ms per
+  # query and rarely improves recall (hop-2 already captures bridge entities).
+  # Toggle true for multi-hop-heavy ablations.
+  enable_hop3: false
+
+  # Mention-degree above which an entity is excluded as a bridge target (hub
+  # suppression). The cap corresponds to ~3% of corpus chunks (the
+  # hub_threshold_ratio=0.03 used at ingestion-time cleanup). Computed once per
+  # process, cached per cap value. Refs: hub suppression, GraphRAG (Edge et
+  # al., 2024).
+  hub_mention_cap: 280
+
+  # Max number of `e1.name CONTAINS $x` matches that feed the hop-2/3 bridge
+  # expansion. A generic query string can match dozens of hub entities and
+  # expanding RELATED_TO from each produces multi-second graph queries; bridging
+  # through a hub adds no signal, so only the first few matches are expanded.
+  # (KuzuGraphStore.HUB_FANOUT_CAP; absent => class default 5.)
+  hub_fanout_cap: 5
+
+  # Per-call wall-clock budget (seconds) for HybridStore.graph_search. A
+  # pathological hub query that exceeds this returns PARTIAL results with a
+  # logged WARNING, so graph_search output is budget-bounded (and thus
+  # hardware-dependent at the tail). Raise high to make the path deterministic.
+  # (HybridStore.GRAPH_SEARCH_BUDGET_S; absent => class default 8.0.)
+  search_budget_seconds: 8.0
+
+  # Relationship types stored in graph
+  relation_types:
+    - "from_source"     # Chunk → Document
+    - "next_chunk"      # Chunk → Chunk (sequential)
+    - "mentions"        # Chunk → Entity
+    - "related_to"      # Entity → Entity
+
+# ============================================================================
+# RETRIEVAL AUGMENTED GENERATION (RAG)
+# ============================================================================
+rag:
+  # =========================================================================
+  # RETRIEVAL MODE
+  # =========================================================================
+  # Options:
+  #   "vector" - Vector similarity only (baseline)
+  #   "graph"  - Graph traversal only (structural)
+  #   "hybrid" - Weighted combination (recommended)
+  # =========================================================================
+  retrieval_mode: "hybrid"
+
+  # =========================================================================
+  # ABLATION MODE
+  # =========================================================================
+  # A retrieval path can be disabled entirely by setting retrieval_mode to
+  # "vector" or "graph". Within the hybrid path, the per-source RRF weights
+  # below scale each lane's contribution to the fused score WITHOUT removing
+  # it (default 1.0 = vanilla equal-weight RRF).
+  # =========================================================================
+
+  # RRF Fusion Parameter
+  # Note: rrf_k here is consumed by HybridRetriever (data layer) for its own
+  # internal fusion pass. The Navigator (logic layer) reads navigator.rrf_k
+  # separately for its RRF fusion over sub-query result lists. Both default
+  # to 60 (Cormack et al., 2009) but serve different components and must be
+  # maintained independently.
+  rrf_k: 60                    # Reciprocal Rank Fusion constant (standard: 60)
+  cross_source_boost: 1.2      # Boost for chunks appearing in both retrieval paths
+
+  # Per-source RRF weights. Each lane's RRF contribution is scaled by its
+  # weight: rrf += weight * (1 / (rrf_k + rank)). Default 1.0 = vanilla
+  # equal-weight RRF (no behaviour change). Down-weight a lane (e.g.
+  # graph_weight: 0.5) to test how much it contributes, without disabling it.
+  # Read by HybridRetriever (data layer). Ref: Cormack et al. (2009) SIGIR.
+  vector_weight: 1.0
+  graph_weight: 1.0
+  bm25_weight: 1.0
+
+  # BM25 sparse retrieval — third retrieval path alongside dense vector search
+  # and graph traversal. No model download required; index built lazily from
+  # LanceDB on first query. Requires: pip install rank_bm25.
+  # bm25_top_k = 20: BM25 cost is O(N) but tiny; the wider funnel improves
+  # bridge-chunk recall before fusion.
+  enable_bm25: true             # Set false to disable for ablation studies
+  bm25_top_k: 20                # BM25 candidates per query
+
+# ============================================================================
+# LLM CONFIGURATION (Artifact B — Logic Layer)
+# ============================================================================
+llm:
+  # Active model — must be pulled via: ollama pull <model_name>
+  model_name: "qwen2:1.5b"    # PRIMARY paper baseline — ~5-10s/query, never times out on CPU
+
+  base_url: "http://localhost:11434"
+  temperature: 0.0    # 0.0 = fully deterministic — required for reproducible paper evaluation
+  max_tokens: 200
+  timeout: 60         # Ollama API timeout in seconds
+                      # Comparison model latency on CPU (ablation study):
+                      # qwen2:1.5b ~5-10s, qwen2.5:3b ~10-20s, gemma2:2b ~20-35s,
+                      # llama3.2:3b ~35-55s, phi3 ~45-80s (ablation model, borderline at 60s).
+
+  # Context budget for Verifier (S_V)
+  #
+  # After Navigator filtering, at most max_docs chunks are forwarded to S_V.
+  # Each chunk is truncated to max_chars_per_doc characters. The assembled
+  # context is then capped at max_context_chars as a safety net.
+  #
+  # Theoretical max: max_docs(5) × max_chars_per_doc(800) = 4000 chars
+  # Safety cap:      max_context_chars = 3500 chars (~875 tokens input to LLM)
+  #
+  # max_chars_per_doc is 800 because an answer sentence plus minimal supporting
+  # context routinely spans 600-700 chars; 500 truncated the answer. A 3B model
+  # has a 4096-token (~12 kB) context window, so 3500 chars uses ~30% and leaves
+  # headroom for the prompt template. max_docs stays at 5 to preserve
+  # context-window discipline.
+  max_context_chars: 3500   # Safety cap (overrides theoretical max)
+  max_docs: 5               # Max chunks forwarded to Verifier after Navigator filtering
+  max_chars_per_doc: 800    # ~200 words per chunk
+
+# ============================================================================
+# NAVIGATOR (S_N) — Pre-Generative Filtering
+# ============================================================================
+navigator:
+  # Relevance Filter: keep chunks with score >= factor × max_rrf_score.
+  # factor = 0.6: under nomic-embed-text score compression, a 0.85 cutoff
+  # routinely evicted bridge chunks scoring marginally below the top result.
+  # 0.6 still removes scoring outliers while preserving the answer-bearing
+  # chunk in multi-hop traces.
+  relevance_threshold_factor: 0.6
+
+  # Redundancy Filter: Jaccard similarity threshold for deduplication
+  redundancy_threshold: 0.8
+
+  # Maximum chunk count after filtering (before context shrinkage).
+  # 8 prevents the double-trim pathology where the Navigator caps at N, then the
+  # Verifier drops to max_docs=5 with a different ranking criterion; 8 leaves a
+  # 3-chunk margin for the Verifier reorder. Bridge chunks the cross-encoder
+  # would otherwise demote past rank 8 are handled at the source: the reranker
+  # scores each chunk against the sub-query that retrieved it (not the surface
+  # query), and chained-attribution bridges are decomposed so the bridge chunk
+  # is retrieved by its own focused hop.
+  max_context_chunks: 8
+
+  # Reciprocal Rank Fusion smoothing constant (standard: 60)
+  # Reference: Cormack et al. (2009). SIGIR. DOI: 10.1145/1571941.1572114
+  rrf_k: 60
+
+  # Top-K results per sub-query from HybridRetriever.
+  # 20 matches the upstream widening; the gain from vector_top_k=20 and
+  # bm25_top_k=20 is wasted if the Navigator consumes only 10 per sub-query.
+  top_k_per_subquery: 20
+
+  # Cross-source corroboration boost weights for RRF fusion.
+  # A chunk appearing in N sources/M sub-queries receives:
+  #   boost = 1 + source_weight*(N-1) + query_weight*(M-1)
+  # Tuned on the development split (reported in the paper methodology).
+  corroboration_source_weight: 0.1
+  corroboration_query_weight: 0.05
+
+  # ===========================================================================
+  # Cross-encoder reranker
+  # ===========================================================================
+  # Applies AFTER RRF fusion. Re-scores the top `reranker_top_k` candidate
+  # chunks with a (query, chunk) cross-encoder and re-sorts them. Unlike the
+  # bi-encoder embeddings used for vector search (which embed query and chunk
+  # separately), a cross-encoder reads query+chunk TOGETHER, so it models
+  # word-level interactions and ranks far more accurately — at the cost of one
+  # forward pass per candidate pair.
+  #
+  # Requires: pip install sentence-transformers
+  #
+  # ---- enable_reranker --------------------------------------------------------
+  #   true  : run the cross-encoder rerank stage (recommended; the reranker is
+  #           what surfaces the answer-bearing chunk into the top positions the
+  #           SLM actually reads).
+  #   false : skip reranking; rely on raw RRF order only. Use for the
+  #           "no-reranker" ablation row or strict no-model-download deployments.
+  enable_reranker: true
+  #
+  # ---- reranker_model ---------------------------------------------------------
+  # HuggingFace model id. Loaded once per process via sentence-transformers
+  # CrossEncoder; auto-downloaded + cached under HF_HOME on first use.
+  # Options (accuracy ↑ / size ↑ / latency ↑ as you go down the list):
+  #   "cross-encoder/ms-marco-MiniLM-L-6-v2"  ~22 MB,  ~30 ms/pair CPU  — DEFAULT (lightest)
+  #   "BAAI/bge-reranker-base"                ~1.1 GB, ~80-150 ms/pair  — opt-in (heavier; no net gain in our ablation)
+  #   "BAAI/bge-reranker-large"               ~2.2 GB, ~200-400 ms/pair — strongest, heaviest (tight on <8 GB edge RAM)
+  #   "BAAI/bge-reranker-v2-m3"               ~2.3 GB, multilingual     — only if you need non-English
+  # Changing this does NOT require re-ingestion (reranking is query-time only).
+  # The MiniLM baseline is the default: in our ablation the heavier bge-base
+  # produced no net gain on the bare-RAG row, so it stays an explicit override.
+  reranker_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  #
+  # ---- reranker_top_k ---------------------------------------------------------
+  # How many of the post-RRF candidates to re-score. Chunks beyond this rank
+  # keep their RRF order and are appended after the reranked head. Higher =
+  # more chunks rescored (better recall of a buried answer chunk) but slower.
+  # 10 means: rescore the top 10, leave the rest in RRF order.
+  reranker_top_k: 10
+  #
+  # ---- reranker_max_length ----------------------------------------------------
+  # Token truncation length for each (query, chunk) pair fed to the cross-
+  # encoder. BGE rerankers REQUIRE this set explicitly (the MiniLM model also
+  # honours it). 512 fits a query + a ~400-word chunk. Lower = faster but may
+  # truncate long chunks before the answer span; higher than 512 is rejected by
+  # bge-reranker-base (its positional limit). Leave at 512 unless chunks are
+  # routinely longer than ~400 words.
+  reranker_max_length: 512
+  #
+  # ---- reranker_fp16 ----------------------------------------------------------
+  # Load the cross-encoder in half precision (float16).
+  #   true  : halves model memory (bge-reranker-base ~1.1 GB → ~550 MB,
+  #           bge-reranker-large ~2.2 GB → ~1.1 GB). Recommended on GPU and on
+  #           memory-tight edge devices. WARNING: on pure CPU, fp16 has no native
+  #           compute path and is often SLOWER than fp32 (values get upcast per
+  #           op). Use true only if memory is the binding constraint on CPU.
+  #   false : full fp32 (DEFAULT). Fastest on CPU; uses more RAM.
+  reranker_fp16: false
+
+  # Contradiction filter thresholds (numeric heuristic).
+  # The heuristic can fire on population figures vs. years within topically
+  # related chunks and delete the answer chunk, so the Verifier's NLI-based
+  # contradiction detection is the real guard. Enable only for ablation
+  # comparisons.
+  enable_contradiction_filter: true
+  contradiction_overlap_threshold: 0.3
+  contradiction_ratio_threshold: 2.0
+  contradiction_min_value: 100.0
+
+  # Contradiction-filter number classification (year-vs-count disambiguation).
+  contradiction_number_context_window: 25   # +/- char window for context words
+  contradiction_year_range_min: 1000        # magnitude heuristic: year lower bound
+  contradiction_year_range_max: 2100        # magnitude heuristic: year upper bound
+
+  # ---------------------------------------------------------------------------
+  # PRE-GENERATIVE FILTER ABLATION TOGGLES (paper section 3.3 original
+  # contributions). Each disables one filter so its per-filter ablation row
+  # can be regenerated.
+  # ---------------------------------------------------------------------------
+  enable_entity_overlap_pruning: true
+  enable_entity_mention_filter: true
+  enable_context_shrinkage: true
+
+  # Entity-mention filter thresholds (govern which chunks reach S_V; chosen by
+  # inspection on the dev split).
+  entity_mention_single_token_min: 5        # min chars for a single-token entity match
+  entity_mention_fallback_token_min: 8      # min chars for a per-token fallback (multi-word)
+  entity_mention_specific_single_min: 8     # single token counts as "specific" iff >= this
+  entity_mention_overlap_min_fraction: 0.5  # query-content overlap fraction for tier-1
+  entity_mention_overlap_min_abs: 2         # absolute query-content overlap floor for tier-1
+  entity_mention_rrf_immune_top_k: 2        # top-k RRF chunks never dropped by this filter
+  entity_mention_survivor_floor: 5          # top up to this many chunks for full candidate sets
+
+# ============================================================================
+# PLANNER (S_P) — Query Analysis and Plan Generation
+# ============================================================================
+planner:
+  # Minimum NER confidence for entity extraction.
+  min_entity_confidence: 0.7
+
+  # Maximum number of entities to extract per query
+  max_entities: 10
+
+  # Enable bridge entity detection (for multi-hop queries)
+  enable_bridge_detection: true
+
+  # Parse temporal constraints from queries
+  enable_temporal_parsing: true
+
+  # ---------------------------------------------------------------------------
+  # CLASSIFIER WEIGHT CONSTANTS
+  # Tuned on the development split (reported in the paper methodology).
+  # All six values can be varied here without code changes.
+  # ---------------------------------------------------------------------------
+  # Score bonus for SpaCy Matcher syntactic hits (Phase 2 of classify())
+  classifier_spacy_weight: 1.5
+  # Score bonus when entity/noun density indicates multi-hop (Phase 3)
+  classifier_entity_boost: 0.5
+  # Base term in confidence formula: conf = min(cap, base + score * scale)
+  classifier_confidence_base: 0.6
+  # Score multiplier in confidence formula
+  classifier_confidence_scale: 0.15
+  # Upper cap on returned classification confidence
+  classifier_confidence_cap: 0.95
+  # Confidence returned when no pattern matches (SINGLE_HOP fallback).
+  # 0.5 places the fallback strictly below any actual pattern match: a
+  # single-pattern match scores base 0.60 + scale 0.15 × 1 = 0.75, so a
+  # no-match must report lower for "confidence reflects classifier certainty"
+  # to hold.
+  classifier_fallback_confidence: 0.5
+
+  # ---------------------------------------------------------------------------
+  # ENTITY DENSITY THRESHOLDS (Phase 3 of classify())
+  # Queries with more than these counts receive a multi-hop score boost.
+  # ---------------------------------------------------------------------------
+  entity_density_threshold: 2    # Named entity count threshold
+  noun_density_threshold: 4      # Noun/proper-noun count threshold
+
+  # Confidence assigned to entities found via regex fallback (not SpaCy NER)
+  regex_entity_confidence: 0.75
+
+  # ---------------------------------------------------------------------------
+  # CLASSIFIER PRE-EMPTS (Pattern I / Pattern J / structural comparison)
+  # The pre-empts route closed-class English constructions before/around the
+  # 4-phase scoring classifier. Set enable_classifier_preempts false to ablate
+  # them. Confidence/boost values chosen by inspection on the dev split.
+  # ---------------------------------------------------------------------------
+  enable_classifier_preempts: true
+  preempt_comparison_confidence: 0.90   # Pattern I (boolean conjunction)
+  preempt_multihop_confidence: 0.80     # Pattern J (implicit bridge)
+  structural_comparison_boost: 1.0      # Phase 3.6 structural-comparison score boost
+
+  # ---------------------------------------------------------------------------
+  # NER CONFIDENCE ESTIMATION (EntityExtractor._estimate_confidence)
+  # SpaCy exposes no per-entity confidence; it is estimated from a per-label
+  # table plus a length bonus. Values derived by inspection from en_core_web_sm
+  # reliability on OntoNotes-5.
+  # ---------------------------------------------------------------------------
+  ner_default_confidence: 0.7         # label absent from the per-label table
+  ner_length_bonus_cap: 0.1           # max length bonus
+  ner_length_bonus_per_token: 0.03    # bonus per whitespace token
+
+# ============================================================================
+# AVAILABLE MODELS (for multi-model evaluation and ablation)
+# All models must be installed via: ollama pull <name>
+# ============================================================================
+available_models:
+  # Paper comparison models — accuracy vs. latency on edge CPU (1.5B–3.8B)
+
+  - name: "qwen2:1.5b"
+    description: "Qwen 2 1.5B — fastest model, reliably under 60s"
+    params_b: 1.5
+    quantization: "Q4_K_M"
+    expected_latency_s: 10
+    safe_60s: true
+
+  - name: "gemma2:2b"
+    description: "Gemma 2 2B — good quality/speed ratio (Google)"
+    params_b: 2.0
+    quantization: "Q4_K_M"
+    expected_latency_s: 25
+    safe_60s: true
+
+  - name: "llama3.2:3b"
+    description: "Llama 3.2 3B — Meta reference for the 3B class"
+    params_b: 3.0
+    quantization: "Q4_K_M"
+    expected_latency_s: 45
+    safe_60s: true
+
+  - name: "phi3"
+    description: "Phi-3 Mini 3.8B — Microsoft edge flagship, borderline at 60s"
+    params_b: 3.8
+    quantization: "Q4_K_M"
+    expected_latency_s: 55
+    safe_60s: false
+
+  - name: "qwen3:4b"
+    description: "Qwen 3 4B — improved multi-hop reasoning, ~3.5 GB RAM"
+    params_b: 4.0
+    quantization: "Q4_K_M"
+    expected_latency_s: 35
+    safe_60s: true
+
+# ============================================================================
+# AGENTIC CONTROLLER (Artifact B)
+# ============================================================================
+agent:
+  # Maximum self-correction iterations in the Verifier loop.
+  # 1 iteration: Self-Refine (Madaan et al., 2023) reproduces on GPT-3.5+, but
+  # on a 1.5B-parameter SLM the second pass typically injects hallucinations
+  # rather than correcting them. Set to 2 only as an ablation comparison.
+  max_verification_iterations: 1
+
+  # Enable/disable individual pipeline stages (ablation flags)
+  enable_planner: true
+  enable_verifier: true
+
+  # ---------------------------------------------------------------------------
+  # Confidence gate
+  # ---------------------------------------------------------------------------
+  # When true, the pipeline runs a cheap single-pass baseline retrieval first
+  # and, if retrieval confidence is HIGH, answers directly from it -- skipping
+  # the Planner's iterative decomposition (a net cost when the answer is already
+  # cleanly retrievable). Only escalates to the full agentic path when
+  # confidence is NOT high. Refs: selective prediction (Geifman & El-Yaniv
+  # 2019); Self-RAG adaptive retrieval (Asai et al. 2024).
+  #   enable_confidence_gate: master toggle.
+  #   confidence_score_gap_threshold: top1/top2 RRF-score ratio for "dominant
+  #     top chunk" (Signal A). Higher = stricter (fewer HIGH verdicts).
+  #   confidence_require_signals: how many of the 3 signals (score-gap /
+  #     multi-source / entity-coverage) must fire for HIGH. 2 = balanced;
+  #     3 = very conservative (gate rarely fires); 1 = aggressive.
+  # Disabled by default: in our ablation a flat top-5 RRF distribution on bridge
+  # questions meant Signal A never fired, so the gate routed them to the full
+  # agentic path anyway — added latency without changing behaviour. Kept as an
+  # opt-in toggle for future ablation rows.
+  enable_confidence_gate: false
+  confidence_score_gap_threshold: 1.5
+  confidence_require_signals: 2
+
+  # ---------------------------------------------------------------------------
+  # Over-decomposition gate
+  # ---------------------------------------------------------------------------
+  # When true, plans matching the `fallback_generic_2hop` pattern, or
+  # `connector_split` plans whose every hop is at most
+  # connector_split_min_half_words content words, are re-routed to a
+  # single-pass passthrough plan (low-precision decompositions confuse the
+  # SLM more than they help retrieval). Set false to ablate.
+  enable_over_decomposition_gate: true
+  connector_split_min_half_words: 4
+
+  # ---------------------------------------------------------------------------
+  # Verification-triggered re-retrieval loop — opt-in, default off
+  # ---------------------------------------------------------------------------
+  # When true, after the verifier produces an answer, the pipeline runs ONE
+  # additional retrieval pass with a HyDE-style query expansion (Gao 2022) —
+  # the failed draft is appended to the query to surface chunks that the
+  # first retrieval missed. The merged context is re-verified; the new answer
+  # is kept only when plausibly an improvement (keep-best guard).
+  # Targets the ~35% "retrieval-miss" failure bucket — the one class of
+  # failure that post-hoc answer-checking structurally cannot fix because the
+  # answer is not in the first retrieval at all. Bounded to one extra
+  # retrieval + verification round per query (edge-latency cap).
+  # Refs: FLARE (Jiang 2023 EMNLP); Self-RAG (Asai 2024 ICLR);
+  #       IRCoT (Trivedi 2023 ACL).
+  enable_reretrieval_loop: false
+
+  # FIFO query-result cache (SHA-256-keyed, insertion-order eviction)
+  enable_caching: true
+  cache_max_size: 1000
+
+# ============================================================================
+# DATA PATHS
+# ============================================================================
+paths:
+  root: "./"
+  data: "./data"
+  documents: "./data/documents"
+  # vector_db / graph_db are NON-dataset fallbacks only. In the dataset-scoped
+  # evaluation flow they are overridden at runtime with ./data/<dataset>/vector
+  # and ./data/<dataset>/graph (DatasetStoreManager.get_paths()).
+  vector_db: "./data/vector"
+  graph_db: "./data/graph"
+  cache: "./cache"
+
+# ============================================================================
+# PERFORMANCE TUNING
+# ============================================================================
+performance:
+  # Embedding batch size (higher = faster ingestion, more memory)
+  batch_size: 64
+
+  # Documents per ingestion batch (progress + memory granularity in the eval
+  # harness ingestion loop). Distinct from batch_size above, which is the
+  # per-request embedding batch sent to Ollama.
+  ingestion_batch_size: 100
+
+  # Compute device: "cpu" or "cuda" (if available)
+  device: "cpu"
+
+# ============================================================================
+# BENCHMARK CONFIGURATION (for paper evaluation)
+# ============================================================================
+benchmark:
+  # Dataset and sample count are selected on the CLI (--dataset / --samples);
+  # this block holds only the values the eval code reads from settings.
+  #
+  # Token-F1 threshold above which an answer counts as correct for the
+  # headline "Soft-EM" metric. Strict Exact Match is too brittle for
+  # formal-vs-common name variants (a full legal name vs its common short form
+  # scores EM=0 but F1≈0.8). Strict EM is still reported alongside.
+  # Range [0.0, 1.0]; 0.6 admits middle-name/nickname variants while excluding
+  # answers that share only one token. Set to 1.0 to fall back to exact-match.
+  answer_f1_threshold: 0.6
+
+  # Run retrieval-path ablations by setting `rag.retrieval_mode` to "vector",
+  # "graph", or "hybrid" — those three values are the only retrieval-path
+  # toggles the production code honors. (Per-source down-weighting is available
+  # via the rag.*_weight knobs.)
+
+# ============================================================================
+# VERIFIER (S_V) — Pre-Validation and Self-Correction
+# ============================================================================
+verifier:
+  # ---------------------------------------------------------------------------
+  # PRE-GENERATION VALIDATION FLAGS
+  # Verifier-side NLI contradiction detection is not enabled here: it needs a
+  # ~270 MB cross-encoder download, which conflicts with the edge-deployment
+  # constraint of the paper. It can be reactivated via the fields under "NLI
+  # contradiction detection" further down (default OFF).
+  # ---------------------------------------------------------------------------
+  enable_entity_path_validation: true
+  enable_credibility_scoring: true
+
+  # ---------------------------------------------------------------------------
+  # Structured (slot-filling) Chain-of-Thought
+  # ---------------------------------------------------------------------------
+  # When true, the first-iteration answer prompts are replaced with step-by-step
+  # templates that constrain the SLM to fill reasoning slots before a
+  # "FINAL ANSWER:" marker, which is parsed out before claim verification. This
+  # is SCAFFOLDED CoT (Khot et al. 2023, Decomposed Prompting), not free-form
+  # "think step by step" -- the latter only helps >10B models (Wei et al. 2022);
+  # small models need the fixed slots. The final answer is grounded in retrieved
+  # chunks (claims still verified against context, not the reasoning steps).
+  #   enable_structured_cot: master toggle.
+  #   cot_max_tokens: generation cap for the multi-step output (must exceed the
+  #     direct-answer max_tokens=200 so the FINAL ANSWER line is not truncated).
+  # Disabled by default: in our traces the SLM followed the scaffolded steps but
+  # still confabulated / false-anchored, and the added per-query latency was not
+  # paid back in EM. Kept as an opt-in toggle.
+  enable_structured_cot: false
+  cot_max_tokens: 400
+
+  # ---------------------------------------------------------------------------
+  # Answer verification upgrades — opt-in, default off
+  # ---------------------------------------------------------------------------
+  # Targeted at the two verifier-fault failure buckets surfaced by
+  # verifier_failure_taxonomy.py (grounded-hallucination + false-abstention).
+  # Both reuse the NLI cross-encoder (nli_model) and the bounded one-retry
+  # pattern, so they add at most one re-prompt per query when they fire.
+  #
+  #   enable_nli_grounding_gate: turn (question, answer) into a declarative
+  #     hypothesis and NLI-check it against the retrieved chunks. A wrong-but-
+  #     grounded answer entails poorly -> one bounded grounding retry.
+  #   nli_grounding_entail_threshold: entailment prob below which the answer is
+  #     treated as not-supported-for-this-question (0.5 = balanced).
+  #   nli_grounding_top_chunks: how many chunks are scored as premise (the max
+  #     entailment over them is used).
+  #   enable_anti_abstention_retry: if the answer is "I don't know" but pre-
+  #     validation found query entities in the context, re-prompt once to
+  #     extract the answer instead of abstaining.
+  enable_nli_grounding_gate: false
+  nli_grounding_entail_threshold: 0.5
+  nli_grounding_top_chunks: 4
+  enable_anti_abstention_retry: false
+
+  # ---------------------------------------------------------------------------
+  # Context distillation (RECOMP-style, Yu et al. 2024 NAACL)
+  # ---------------------------------------------------------------------------
+  # When true, inserts one extra LLM call between the context reorder and the
+  # final answer call to condense the retrieved chunks into a structured fact
+  # list. Targets Lost-in-the-Middle (Liu et al. 2023) at SLM scale by
+  # presenting the LLM a clean, ordered fact set instead of N noisy chunks.
+  # Default off because the effect is RETRIEVAL-DEPENDENT: on noisy
+  # (decomposed) context it helps, but on clean (bare-RAG) retrieval it is
+  # net-negative — the distilled context drops information the LLM would have
+  # used. Opt-in for retrieval modes that produce noisy context.
+  enable_context_distillation: false
+
+  # Entity-path validation: minimum fraction of query entities that must
+  # appear in the retrieved context for the check to pass.
+  # 0.34 (a 1/3 floor): for 3-entity bridge queries (subject + bridge + object),
+  # 0.5 would demand 2/3 entities present, but the bridge entity is unknown at
+  # S_P time and is added only after Hop 0. A 1/3 floor lets the gold chunk pass
+  # on the first hop.
+  entity_coverage_threshold: 0.34
+
+  # Source credibility scoring thresholds.
+  min_credibility_score: 0.5       # Chunks below this are filtered (only when credibility_filter_drop=true)
+
+  # Credibility filtering mode. false (default, SAFE) = credibility is
+  # informational only; scores are computed/logged but NO chunk is evicted, so a
+  # top-RRF gold chunk with a low credibility score is not silently dropped
+  # before the LLM (a real gold-eviction path). true = legacy
+  # drop-below-min_credibility behaviour, kept for ablation.
+  credibility_filter_drop: false
+
+  # Credibility signal weights — must sum to 1.0.
+  # Tuned on the development split (reported in the paper methodology).
+  credibility_weight_cross_ref: 0.4     # Cross-reference corroboration
+  credibility_weight_entity_freq: 0.3   # Named-entity density
+  credibility_weight_provenance: 0.3    # Graph vs. vector retrieval origin
+
+  # Credibility scoring normalisation constants.
+  credibility_cross_ref_max: 3.0        # Divisor for cross-reference count
+  credibility_provenance_baseline: 0.5  # Score for vector-only (non-graph) chunks
+
+  # Numeric-divergence threshold for offline (heuristic) contradiction
+  # detection. Pairs of chunks where the same entity is assigned numeric
+  # values whose relative difference exceeds this fraction are flagged.
+  # Only used when transformers/NLI is unavailable.
+  heuristic_contradiction_threshold: 0.5
+
+  # Entity-frequency normalisation divisors used in credibility scoring.
+  # A chunk with N entities scores min(1.0, N / normalizer) on the
+  # entity-density signal. SpaCy NER is more precise than regex proper-noun
+  # matching, so it uses a lower divisor (fewer false positives → fewer
+  # entities expected per chunk).
+  credibility_entity_freq_normalizer_spacy: 5.0
+  credibility_entity_freq_normalizer_regex: 10.0
+
+  # SpaCy processing limit inside credibility scoring (edge CPU budget).
+  spacy_max_chars: 500
+
+  # ConfidenceLevel thresholds for VerificationResult.confidence property.
+  # A verified-claim ratio >= high_threshold → HIGH, >= medium_threshold → MEDIUM.
+  confidence_high_threshold: 0.8
+  confidence_medium_threshold: 0.5
+
+  # Claim extraction and entity verification limits.
+  min_claim_chars: 15       # Minimum characters for a sentence to count as a claim
+  max_entities_to_verify: 5 # Max entities checked per claim during verification
+  max_key_phrases: 10       # Max key phrases per chunk in cross-reference scoring
+
+  # ---------------------------------------------------------------------------
+  # BOUNDED RETRY PATHS (each fires at most once per query; toggleable)
+  # ---------------------------------------------------------------------------
+  # Bridge-entity exclusion retry: re-prompt when the LLM returns a known
+  # bridge entity as the final answer instead of the requested attribute.
+  enable_bridge_exclusion_retry: true
+  bridge_substring_min_length: 5    # min len for a substring bridge-hit
+  bridge_exclusion_top_k: 5         # entities listed in the exclusion prompt
+  # Format-mismatch retry: re-prompt when a wh-question is answered yes/no.
+  enable_format_validation_retry: true
+
+  # ---------------------------------------------------------------------------
+  # QUESTION-RELEVANCE REORDER (mitigates small-LLM positional bias; the
+  # reorder cannot evict a chunk — the RRF cap owns set membership)
+  # ---------------------------------------------------------------------------
+  enable_question_relevance_reorder: true
+  query_keyword_min_length: 4        # min chars for a query keyword token
+  idf_min_candidates: 4              # below this, IDF over the candidate set degenerates
+  distinctive_entity_min_length: 8   # single-token entity coverage-floor threshold
+  length_norm_exponent: 0.5          # sqrt length normaliser
+
+  # Context-distillation gating (only used when enable_context_distillation).
+  context_distillation_min_input_chars: 200   # skip distillation below this length
+  context_distillation_min_output_chars: 30   # treat shorter distilled output as no-op
+
+  # Token-grounding check for claims with no extractable proper noun.
+  short_claim_max_tokens: 6          # treated as a "short factual claim"
+  claim_content_token_min_length: 2  # min len for a non-numeric content token
+
+  # NLI contradiction detection (ablation-only; default OFF — requires a
+  # ~270 MB cross-encoder, conflicting with the edge-deployment constraint).
+  enable_contradiction_detection: false
+  contradiction_threshold: 0.85      # NLI confidence to flag a contradiction
+  nli_model: "cross-encoder/nli-distilroberta-base"
+  nli_max_input_chars: 200           # per-chunk truncation before NLI inference
+
+  # Sentence-boundary fraction for head-truncation fallback in _format_context.
+  format_sentence_boundary_fraction: 0.7
+
+# ============================================================================
+# INGESTION CONFIGURATION
+# ============================================================================
+ingestion:
+  # Available strategies: sentence | sentence_spacy | semantic | fixed | recursive
+  chunking_strategy: "sentence_spacy"
+
+  # Sentence strategy (paper default: 3 sentences per chunk, 1 overlap)
+  # Alternative (finer granularity, requires re-ingestion):
+  #   sentences_per_chunk: 2   # a single fact sentence → own chunk → sharper BM25 hit
+  sentences_per_chunk: 3
+  sentence_overlap: 1
+
+  # Fixed/Recursive/Semantic strategy
+  chunk_size: 1024
+  chunk_overlap: 128
+  min_chunk_size: 50
+
+  # Semantic strategy
+  min_lexical_diversity: 0.3
+  min_information_density: 2.0
+
+  # Fixed chunking: word-boundary heuristic
+  # Break at last space if it falls within the last (1 - factor) * chunk_size chars.
+  # 0.8 = break at word boundary when space is within the last 20% of the chunk.
+  word_boundary_factor: 0.8
+
+  # Maximum character length per sentence-based chunk (SpacySentenceChunker)
+  max_chunk_chars: 2000
+
+  # SpaCy-specific settings
+  spacy_model: "en_core_web_sm"
+  entity_aware_chunking: false
+
+  # Quality filter thresholds (AutomaticQualityFilter — semantic chunking only)
+  quality_filter:
+    min_length: 100   # Minimum characters per chunk
+    min_words: 15     # Minimum word count per chunk
+
+  # Metadata and entity extraction during ingestion
+  extract_entities: true
+  add_source_metadata: true
+
+# ============================================================================
+# ENTITY EXTRACTION (GLiNER + REBEL)
+# ============================================================================
+entity_extraction:
+
+  # GLiNER Named Entity Recognition
+  # Reference: Zaratiana et al. (2023). arXiv:2311.08526.
+  gliner:
+    model_name: "urchade/gliner_small-v2.1"
+    # ─────────────────────────────────────────────────────────────────────
+    # FIXED: OntoNotes core entity-type set.
+    #
+    # 9 GLiNER prompts → 8 canonical types (via GLINER_LABEL_MAP):
+    #   person                       → PERSON
+    #   organization                 → ORGANIZATION
+    #   location                     → LOCATION
+    #   city, country                → GPE
+    #   date                         → DATE
+    #   event                        → EVENT
+    #   work of art                  → WORK_OF_ART
+    #   product                      → PRODUCT
+    #
+    # The multi-prompt expansion (city + country alongside location) gives
+    # GLiNER higher recall than a single abstract label (Zaratiana et al.,
+    # 2023). All prompts collapse to the OntoNotes canonical types in the
+    # graph, so retrieval semantics are unchanged.
+    #
+    # ⚠ DO NOT add domain-specific types (state, landmark, album, film,
+    # movie, award, ...). They transfer poorly across diverse QA datasets and
+    # break cross-dataset reproducibility. This list is fixed by deliberate
+    # design — the standard OntoNotes-style set also used by spaCy
+    # en_core_web_sm.
+    # ─────────────────────────────────────────────────────────────────────
+    entity_types:
+      - "person"
+      - "organization"
+      - "location"
+      - "city"
+      - "country"
+      - "date"
+      - "event"
+      - "work of art"
+      - "product"
+    confidence_threshold: 0.15   # recall-optimised; junk filtered downstream
+    batch_size: 16
+
+  # REBEL Relation Extraction
+  # Reference: Cabot & Navigli (2021). EMNLP 2021 Findings.
+  rebel:
+    model_name: "Babelscape/rebel-large"
+    # Ablation toggle: false skips relation extraction entirely (GLiNER-only
+    # graph; no relation edges). Read by IngestionConfig.from_yaml.
+    enabled: true
+    confidence_threshold: 0.5    # uniform sentinel — REBEL emits no per-triplet score
+    batch_size: 8                # reserved for future batched implementation
+    min_entities_for_re: 2       # skip RE when fewer entities are found (~60% reduction)
+    max_input_length: 256        # tokenizer truncation length
+    max_output_length: 256       # generation length cap
+    num_beams: 5                 # beam search width
+
+  # Entity caching (in-memory LRU + SQLite persistent store)
+  caching:
+    enabled: true
+    cache_path: "./data/entity_cache.db"
+    lru_cache_size: 10000
+
+  # SVO (subject-verb-object) dependency-parse triple extraction — optional
+  # ingestion stage, active only when spaCy is available. Parallels the REBEL
+  # confidence sentinel: SVO triples carry no per-triple model score, so a
+  # uniform confidence is assigned to every extracted triple.
+  svo:
+    confidence: 0.7
+
+  # Fallback-path confidence sentinels. Used ONLY when the primary GLiNER+REBEL
+  # path is unavailable: spaCy-as-GLiNER fallback, regex last-resort, the
+  # lightweight spaCy-only pipeline, and legacy cache rows that predate
+  # per-entity confidence. The reproducible GLiNER-on run never reads these.
+  fallback_confidence:
+    gliner_spacy: 0.7    # spaCy used as the GLiNER fallback
+    gliner_regex: 0.5    # regex proper-noun heuristic (last resort)
+    spacy_light: 0.8     # SpacyEntityPipeline (no GLiNER/REBEL stack)
+    cache_default: 0.5   # missing-field default for legacy cache rows
