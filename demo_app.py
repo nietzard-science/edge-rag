@@ -288,7 +288,7 @@ def _print_summary_card(question: str, answer: str, confidence: str,
         return "  " + frame("║ ") + text
 
     print("\n  " + frame("╔" + bar + "╗"))
-    title = bold(cyan("  EDGE-RAG  ·  one-question summary"))
+    title = bold(cyan("  EDGE-RAG  -  one-question summary"))
     print(row(title))
     print("  " + frame("╠" + bar + "╣"))
 
@@ -456,8 +456,12 @@ def _print_presenter_summary(result, capture: "_LaneCapture") -> None:
     if hops:
         for h in hops:
             tag = " [bridge]" if h.get("is_bridge") else ""
-            field(f"  hop {h.get('step_id', '?')}",
-                  f"{str(h.get('sub_query', ''))[:70]}{tag}")
+            # Printed directly (not via field()) so long hop text still
+            # renders bright: field() dims + wraps any value over 100 chars,
+            # which would make hop 1 (often the full original question) grey.
+            label = bold(f"  hop {h.get('step_id', '?')}:")
+            value = f"{str(h.get('sub_query', ''))[:160]}{tag}"
+            print(f"    {label} {value}")
     else:
         field("Hops", "single-pass (no decomposition)")
 
@@ -564,6 +568,17 @@ def _run_compare(pipeline, retriever, capture: "_LaneCapture",
         nav = result.navigator_result if isinstance(result.navigator_result, dict) else {}
         chunks = nav.get("filtered_context") or []
         return [capture.title_of_chunk(c) for c in chunks], elapsed
+
+    # Warm the Ollama embedding endpoint before either timed pass. Ollama is a
+    # separate server process from this pipeline: even a "warm" pipeline can
+    # hit a cold embedding-model load on its first HTTP call if the model had
+    # idled out of Ollama's own residency. Untimed here, that one-time cost
+    # would otherwise land entirely on the OFF pass (it runs first) and make
+    # the OFF/ON gap look like a graph-lane effect when it is not.
+    try:
+        retriever._embed_query(question)
+    except (OSError, RuntimeError, ValueError, ConnectionError, AttributeError):
+        pass
 
     off_titles, off_s = one_pass(RetrievalMode.VECTOR)
     on_titles, on_s = one_pass(RetrievalMode.HYBRID)
@@ -731,8 +746,11 @@ def main() -> None:
     # The first build after Ollama idles out its models can take 10-35 s
     # (embedding-model cold load) — say so instead of looking hung, and turn
     # an infrastructure failure into one actionable line, not a stack trace.
-    print(f"\n{dim('Loading pipeline... (a fully cold start — Ollama model + NER/reranker '
-                    'weights — can take 1-2 min; warm reruns are fast)')} ",
+    print(f"\n{dim('Loading pipeline... (this process has no pipeline yet, so this '
+                    'always builds it from scratch — Ollama model + NER/reranker '
+                    'weights — can take 1-2 min; a fresh `python demo_app.py` call '
+                    'pays this again even if you ran it a moment ago, use '
+                    '--interactive to ask several questions in one warm process)')} ",
           end="", flush=True)
     t0 = time.time()
     try:
